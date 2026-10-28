@@ -2,6 +2,13 @@
 
 All notable changes to ExchangeServerReadinessCheck.ps1 are documented here.
 
+## 1.5 - 28/10/2026
+
+- Added a read-only Exchange Setup registry marker check across Exchange v15 role keys, including AdminTools.
+- Reports a pending `Watermark` as a `BLOCKER` for unattended Setup; reports a remaining `Action` without a watermark as `REVIEW`.
+- Reports registry access failures as incomplete rather than assuming that no markers exist.
+- Added Microsoft CSS-Exchange guidance for resuming a failed installation through GUI Setup when available, without deleting registry markers.
+
 ## 1.4 - 27/09/2026
 
 - Added Exchange Server SE Management Tools readiness support for Windows 10/11 64-bit client operating systems.
