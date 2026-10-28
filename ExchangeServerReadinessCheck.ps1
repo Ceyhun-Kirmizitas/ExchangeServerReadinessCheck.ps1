@@ -20,7 +20,7 @@ The script checks the main items needed before Exchange SE installation, includi
 - .NET Framework, Remote Registry, and role-specific Visual C++, UCMA 4.0, IIS URL Rewrite, or AD LDS prerequisites
 - TLS/SCHANNEL settings
 - Microsoft Defender status and exclusions
-- Previous Exchange Setup log detection
+- Previous Exchange Setup log and unfinished Action/Watermark registry marker detection
 - Credential Guard, power plan, regional settings, time zone, and IE ESC
 
 When two or more servers are checked, results are grouped by check by default. The script also compares regional settings and time zone values between servers.
@@ -119,8 +119,8 @@ Author  : Ceyhun Kirmizitas
 Check my GitHub page for updates and other useful tools:
 https://github.com/Ceyhun-Kirmizitas
 
-Version : 1.4
-Date    : 27/09/2026
+Version : 1.5
+Date    : 28/10/2026
 Scope   : Exchange Server Subscription Edition role-aware readiness check
 Shell   : Windows PowerShell 5.1
 Mode    : Read-only
@@ -172,9 +172,17 @@ Microsoft references used by this script:
   https://learn.microsoft.com/en-us/exchange/antispam-and-antimalware/windows-antivirus-software
 - Microsoft CSS-Exchange SetupLogReviewer:
   https://microsoft.github.io/CSS-Exchange/Setup/SetupLogReviewer/
+- Microsoft CSS-Exchange InstallWatermark:
+  https://microsoft.github.io/CSS-Exchange/Setup/SetupAssist/InstallWatermark/
 
 Change log
 ----------
+1.5 - 28/10/2026
+- Added read-only Exchange Setup Action/Watermark registry detection across v15 role keys.
+- Flags a pending Watermark as a BLOCKER for unattended Setup and a remaining Action without a Watermark as REVIEW.
+- Reports registry query failures as incomplete instead of implying setup readiness.
+- Includes Microsoft CSS guidance to resume a failed installation via GUI where available, without deleting registry values.
+
 1.4 - 27/09/2026
 - Added Exchange Server SE Management Tools readiness support for Windows 10/11 64-bit client operating systems.
 - Added the Windows client Management Tools feature baseline: IIS-ManagementConsole and IIS-Metabase.
@@ -317,7 +325,7 @@ if ($InternalLocal -and [string]::IsNullOrWhiteSpace($Role)) {
 }
 
 $script:SelectedRole = $Role
-$script:ScriptVersion = '1.4'
+$script:ScriptVersion = '1.5'
 
 function Show-HelpText {
     param([Parameter(Mandatory = $true)][string]$Text)
@@ -1297,6 +1305,62 @@ function Get-ExchangeSetupHistoryInfo {
     }
 }
 
+
+function Get-ExchangeSetupMarkerInfo {
+    # Read the native 64-bit registry view even when called from a 32-bit shell.
+    # Setup records unfinished role actions under the Exchange v15 role keys.
+    $items = New-Object System.Collections.Generic.List[object]
+    $localMachine = $null
+    $exchangeKey = $null
+
+    try {
+        $localMachine = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64
+        )
+        $exchangeKey = $localMachine.OpenSubKey('SOFTWARE\Microsoft\ExchangeServer\v15', $false)
+
+        if ($null -eq $exchangeKey) {
+            return [PSCustomObject]@{ QueryStatus = 'NotPresent'; Items = @(); Error = '' }
+        }
+
+        foreach ($subKeyName in $exchangeKey.GetSubKeyNames()) {
+            $subKey = $exchangeKey.OpenSubKey($subKeyName, $false)
+            if ($null -eq $subKey) {
+                throw ("Could not read Exchange registry subkey: {0}" -f $subKeyName)
+            }
+
+            try {
+                $valueNames = @($subKey.GetValueNames())
+                $hasAction = ($valueNames -contains 'Action')
+                $hasWatermark = ($valueNames -contains 'Watermark')
+
+                if ($hasAction -or $hasWatermark) {
+                    [void]$items.Add([PSCustomObject]@{
+                        Role         = [string]$subKeyName
+                        HasAction    = [bool]$hasAction
+                        HasWatermark = [bool]$hasWatermark
+                        Action       = if ($hasAction) { [string]$subKey.GetValue('Action') } else { '<Not present>' }
+                        Watermark    = if ($hasWatermark) { [string]$subKey.GetValue('Watermark') } else { '<Not present>' }
+                    })
+                }
+            }
+            finally {
+                $subKey.Close()
+            }
+        }
+
+        return [PSCustomObject]@{ QueryStatus = 'Available'; Items = @($items.ToArray()); Error = '' }
+    }
+    catch {
+        return [PSCustomObject]@{ QueryStatus = 'Error'; Items = @($items.ToArray()); Error = $_.Exception.Message }
+    }
+    finally {
+        if ($null -ne $exchangeKey) { $exchangeKey.Close() }
+        if ($null -ne $localMachine) { $localMachine.Close() }
+    }
+}
+
 function Get-PhysicalDiskInventory {
     $items = New-Object System.Collections.Generic.List[object]
     $errorText = $null
@@ -1869,6 +1933,7 @@ function Get-ServerState {
     $tlsBaseline = @(Get-TlsBaselineInfo)
     $antimalware = Get-AntimalwareInfo
     $setupHistory = Get-ExchangeSetupHistoryInfo
+    $setupMarkers = Get-ExchangeSetupMarkerInfo
     $physicalDiskInventory = Get-PhysicalDiskInventory
     $currentUserMembership = Get-CurrentUserMembershipInfo
     $fsmoRoles = Get-FsmoRoleInfo
@@ -2063,6 +2128,7 @@ function Get-ServerState {
         TlsBaseline            = $tlsBaseline
         Antimalware            = $antimalware
         ExchangeSetupHistory   = $setupHistory
+        ExchangeSetupMarkers   = $setupMarkers
         CurrentUserMembership  = $currentUserMembership
         FsmoRoles              = $fsmoRoles
         SystemLocale           = $systemLocale
@@ -2948,6 +3014,32 @@ function Get-ExchangePreparationChecks {
     }
     else {
         [void]$results.Add((New-CheckResult -Category 'Exchange Setup History' -Name 'Exchange Setup Log' -Status INFO -Current ("Not found: {0}" -f $State.ExchangeSetupHistory.Path) -Expected 'Visibility only'))
+    }
+
+
+    $setupMarkers = $State.ExchangeSetupMarkers
+    $pendingMarkers = @($setupMarkers.Items)
+    $markerExpected = 'No pending Action or Watermark values under HKLM\SOFTWARE\Microsoft\ExchangeServer\v15'
+
+    if ($setupMarkers.QueryStatus -eq 'Error') {
+        [void]$results.Add((New-CheckResult -Category 'Exchange Setup History' -Name 'Exchange Setup Install Watermark' -Status REVIEW -Current $setupMarkers.Error -Expected $markerExpected -Message 'Exchange Setup registry markers could not be fully checked; do not assume the host is ready for unattended Setup.' -Incomplete))
+    }
+    elseif ((Get-SafeCount $pendingMarkers) -gt 0) {
+        $markerDetails = @($pendingMarkers | ForEach-Object {
+            '{0}: Action={1}; Watermark={2}' -f $_.Role,$_.Action,$_.Watermark
+        }) -join ' | '
+        $hasPendingWatermark = ((Get-SafeCount @($pendingMarkers | Where-Object { $_.HasWatermark })) -gt 0)
+        $markerStatus = if ($hasPendingWatermark) { 'BLOCKER' } else { 'REVIEW' }
+        $markerMessage = if ($hasPendingWatermark) {
+            'A previous Exchange Setup attempt left a watermark that can block unattended Setup at prerequisite analysis. Review ExchangeSetup.log. On Server with Desktop Experience, Microsoft CSS-Exchange recommends launching Setup.exe in the GUI to resume the unfinished installation. Do not manually delete the watermark.'
+        }
+        else {
+            'An Exchange Setup Action value remains without a Watermark. Review ExchangeSetup.log and the prior setup state before attempting another installation. Do not delete registry values as a first step.'
+        }
+        [void]$results.Add((New-CheckResult -Category 'Exchange Setup History' -Name 'Exchange Setup Install Watermark' -Status $markerStatus -Current $markerDetails -Expected $markerExpected -Message $markerMessage))
+    }
+    else {
+        [void]$results.Add((New-CheckResult -Category 'Exchange Setup History' -Name 'Exchange Setup Install Watermark' -Status PASS -Current 'No pending Exchange Setup Action or Watermark values detected' -Expected $markerExpected))
     }
 
     $tls12 = @($State.TlsBaseline | Where-Object { $_.Protocol -eq 'TLS 1.2' })
