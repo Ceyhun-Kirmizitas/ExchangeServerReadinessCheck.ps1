@@ -103,6 +103,10 @@ Depending on the selected role, checks include:
 - Existing `C:\ExchangeSetupLogs\ExchangeSetup.log`
 - Previous Exchange Setup activity
 - Microsoft CSS-Exchange SetupLogReviewer reference
+- Read-only detection of unfinished Exchange Setup `Action` and `Watermark` registry values under `HKLM\SOFTWARE\Microsoft\ExchangeServer\v15`
+- `BLOCKER` when a pending watermark may prevent unattended Setup; `REVIEW` for an `Action` value without a watermark
+- Registry query errors are reported as incomplete, not as a false PASS
+- [Microsoft CSS-Exchange InstallWatermark guidance](https://microsoft.github.io/CSS-Exchange/Setup/SetupAssist/InstallWatermark/): use GUI Setup to resume when available; do not delete registry markers manually
 
 ### Regional settings and multi-server consistency
 
